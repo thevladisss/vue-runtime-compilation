@@ -21,5 +21,3 @@ npm run dev
     
     @vue/sfc-compiler package is used to handle runtime compilation
 
-#### Something that is not working now:
- Some features like 
