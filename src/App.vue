@@ -125,7 +125,7 @@ function removeVueImports(code) {
 /**
  * @description Allows to retrieve list of imported dependencies from the code
  * @param code {string}
- * @return {string[]}
+ * @return {(string | {name: string; importAsName: string})[] }
  *
  * @example
  *
@@ -146,51 +146,17 @@ function getVueImportedDependencies(code) {
   while ((match = importRegex.exec(code)) !== null) {
     const imports = match[1].split(',').map(item => item.trim());
     imports.forEach(importItem => {
-      const importedAsName = importItem.split(' as ').map(item => item.trim()).at(-1);
-      vueImports.push(importedAsName);
+      const _import = importItem.split(' as ').map(item => item.trim());
+
+      vueImports.push(_import.length === 2 ? {
+        name: _import.at(0),
+        importAsName: _import.at(-1)
+      }  : _import.at(0));
     });
   }
 
   return vueImports;
 }
-
-
-/**
- * @description Replaces all uses of dependencies from "vue" package
- * to with namespaces use
- * @param code {string}
- * @return {string}
- *
- * @example
- *
- * const script = `
- *  import {openBlock as _openBlock} from "vue"
- *
- *  function render() {
- *    (_openBlock());
- *  }
- * `
- *
- * const processedScript = replaceImportsWithVue(script)
- *  /* Becomes:
- *     function render() {
- *       (Vue.openBlock());
- *     }
- *  /
- */
-function replaceImportsWithVue(code) {
-  const dependencies = getVueImportedDependencies(code)
-
-  dependencies.forEach(dependency => {
-
-    const isImportAs = dependency.startsWith("_")
-
-    code = code.replaceAll(dependency,dependency => `Vue.${isImportAs ? dependency.substring(1) : dependency}`)
-  })
-
-  return code;
-}
-
 
 /**
  *
@@ -198,7 +164,7 @@ function replaceImportsWithVue(code) {
  * @param id {string}
  * @return {function(...[*]): * | null}
  */
-const processTemplate = (descriptor, id) => {
+const processTemplate = async (descriptor, id) => {
   if (descriptor.template) {
 
     // Compile template to render function
@@ -209,18 +175,32 @@ const processTemplate = (descriptor, id) => {
 
     if (errors.length) throw errors;
 
-    let parsedTemplateContent = replaceImportsWithVue(code)
+    const depsToImport = getVueImportedDependencies(code);
 
-    parsedTemplateContent = removeVueImports(parsedTemplateContent)
+    const vue = await import("vue");
+
+    const importedDependencies = depsToImport.reduce((accum, dep) => {
+
+      const isImportAs = typeof dep === "object";
+
+      const vueImportName = isImportAs ? dep.name : dep;
+
+      const usedImportName = isImportAs ? dep.importAsName : dep;
+
+      if (vue[vueImportName]) accum = {...accum, [usedImportName]: vue[vueImportName]}
+      return accum;
+    }, {})
+
+    let parsedTemplateContent = removeVueImports(code)
 
     parsedTemplateContent = parsedTemplateContent.replaceAll("export", "").trim()
 
-    const renderFn = ((...args) => {
+    const renderFn = new Function('deps', `
 
-      const renderFnString = parsedTemplateContent.replace("function", "return function");
+      const {${Object.keys(importedDependencies).join(',')}} = deps;
 
-      return new Function('Vue', renderFnString)(Vue)(...args)
-    })
+       return ${parsedTemplateContent}
+    `)(importedDependencies)
 
     return renderFn;
   }
@@ -234,23 +214,43 @@ const processTemplate = (descriptor, id) => {
  * @param id {string}
  * @return {function(...[*]): * | {}}
  */
-const processScript = (descriptor, id) => {
+const processScript = async (descriptor, id) => {
   if (descriptor.script || descriptor.scriptSetup) {
 
-    const { content} = compileScript(descriptor, {
-      id
-    });
+    const storeVariable = 'ComponentScript'
 
-    let parsedScriptContent = removeExportDefault(content);
+    const {content} = compileScript(descriptor, {
+      id,
+      inlineTemplate: true,
+      genDefaultAs: storeVariable
+    })
 
-    parsedScriptContent = replaceImportsWithVue(parsedScriptContent)
+    const parsedScriptContent = removeVueImports(content);
 
-    parsedScriptContent = removeVueImports(parsedScriptContent)
+    const depsToImport = getVueImportedDependencies(content);
 
-    const script = new Function(`
-    const setup = ${parsedScriptContent};
-    return setup;
-  `)();
+    const vue = await import("vue");
+
+    const importedDependencies = depsToImport.reduce((accum, dep) => {
+
+      const isImportAs = typeof dep === "object";
+
+      const vueImportName = isImportAs ? dep.name : dep;
+
+      const usedImportName = isImportAs ? dep.importAsName : dep;
+
+      if (vue[vueImportName]) accum = {...accum, [usedImportName]: vue[vueImportName]}
+      return accum;
+    }, {})
+
+    const script = new Function('deps', `
+
+      const {${Object.keys(importedDependencies).join(',')}} = deps;
+
+      ${parsedScriptContent}
+
+      return ${storeVariable}
+    `)(importedDependencies)
 
     return script;
   }
@@ -318,9 +318,9 @@ let appInstance = null;
    try {
      const hash = 'hash' //Change
 
-     const render = processTemplate(descriptor, hash);
+     const render = await processTemplate(descriptor, hash);
 
-     let script = processScript(descriptor, hash)
+     let script = await processScript(descriptor, hash)
 
      const styles = processStyles(descriptor, hash);
 
