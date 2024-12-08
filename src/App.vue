@@ -234,23 +234,25 @@ const processTemplate = (descriptor, id) => {
  * @param id {string}
  * @return {function(...[*]): * | {}}
  */
-const processScript = (descriptor, id) => {
+const processScript = async (descriptor, id) => {
   if (descriptor.script || descriptor.scriptSetup) {
 
-    const { content} = compileScript(descriptor, {
-      id
+    const { content } = compileScript(descriptor, {
+      id,
     });
 
-    let parsedScriptContent = removeExportDefault(content);
+    const dependenciesToImport = getVueImportedDependencies(content);
 
-    parsedScriptContent = replaceImportsWithVue(parsedScriptContent)
+    const vue = await import("vue");
 
-    parsedScriptContent = removeVueImports(parsedScriptContent)
+    const dependencies = dependenciesToImport.reduce((accum, dep) => {
+      if (vue[dep]) accum = {...accum, [dep]: vue[dep]}
+      return accum;
+    }, {})
 
-    const script = new Function(`
-    const setup = ${parsedScriptContent};
-    return setup;
-  `)();
+    const parsedScriptContent = removeVueImports(content)
+
+    const script = new Function(...dependenciesToImport, parsedScriptContent.replace("export default", "return"))(dependencies);
 
     return script;
   }
@@ -320,7 +322,7 @@ let appInstance = null;
 
      const render = processTemplate(descriptor, hash);
 
-     let script = processScript(descriptor, hash)
+     let script = await processScript(descriptor, hash)
 
      const styles = processStyles(descriptor, hash);
 
