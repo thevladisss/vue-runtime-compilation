@@ -45,7 +45,7 @@ const count = ref(0);
 
 **Output:**
 
-![img.png](Repl Example.png)
+![img.png](ReplExample.png)
 
 Clicking on increase should be updating the count as any Vue code would in a normal environment
 
