@@ -6,9 +6,9 @@
           <header class="flex justify-between">
             <div class="flex">
               <div
-                  class="text-green-600 border-b border-b-green-600 py-2 px-4"
-                  v-for="file in sfcFiles"
-                  :key="file.name"
+                class="text-green-600 border-b border-b-green-600 py-2 px-4"
+                v-for="file in sfcFiles"
+                :key="file.name"
               >
                 <button>
                   {{ file.name }}
@@ -53,8 +53,8 @@ import {
   parse,
   compileStyle,
 } from "@vue/compiler-sfc";
-import * as Vue from "vue";
-import { onMounted, ref, watch } from "vue";
+import { transform, initialize } from "esbuild-wasm";
+import { onBeforeMount, onMounted, ref, useId, watch } from "vue";
 import { createApp } from "@vue/runtime-dom";
 
 const defaultCode = `
@@ -73,7 +73,7 @@ div:has(h1) {
     text-align: center
 }
 </style>
-`
+`;
 
 const code = ref(defaultCode);
 
@@ -82,7 +82,6 @@ const sfcFiles = ref([
     name: "App.vue",
   },
 ]);
-
 
 /**
  * @description Returns Vue application root element,
@@ -94,10 +93,6 @@ const getVueRoot = () => {
     .querySelector("iframe")
     .contentDocument.body.querySelector("#app");
 };
-
-function removeExportDefault(inputString) {
-  return inputString.replace(/export\s+default\s+/g, "");
-}
 
 /**
  * @description Removes all dependencies import from "vue" package
@@ -116,16 +111,15 @@ function removeExportDefault(inputString) {
  *    // So imports are not removed
  */
 function removeVueImports(code) {
-  const importRegex = /import\s*{[^}]+}\s*from\s*"vue";?/g;
+  const importRegex = /import\s*{[^}]+}\s*from\s*['"]vue['"];?/g;
 
-  return code.replace(importRegex, '');
+  return code.replace(importRegex, "");
 }
-
 
 /**
  * @description Allows to retrieve list of imported dependencies from the code
  * @param code {string}
- * @return {(string | {name: string; importAsName: string})[] }
+ * @return { (string | {name: string; importAsName: string})[] }
  *
  * @example
  *
@@ -133,30 +127,57 @@ function removeVueImports(code) {
  *  import {ref, computed} from "vue"
  * `
  *
- * const dependencies = getVueImportedDependencies(script)
+ * const dependencies = getVueDependenciesImports(script)
  *
  * // dependencies - ["ref", "computed"]
  */
-function getVueImportedDependencies(code) {
+function getVueDependenciesImports(code) {
   const importRegex = /import\s*{([^}]+)}\s*from\s*"vue"/g;
 
   const vueImports = [];
 
   let match;
   while ((match = importRegex.exec(code)) !== null) {
-    const imports = match[1].split(',').map(item => item.trim());
-    imports.forEach(importItem => {
-      const _import = importItem.split(' as ').map(item => item.trim());
+    const imports = match[1].split(",").map((item) => item.trim());
+    imports.forEach((importItem) => {
+      const _import = importItem.split(" as ").map((item) => item.trim());
 
-      vueImports.push(_import.length === 2 ? {
-        name: _import.at(0),
-        importAsName: _import.at(-1)
-      }  : _import.at(0));
+      const isImportAs = _import.length === 2;
+
+      vueImports.push(
+        isImportAs
+          ? {
+              name: _import.at(0),
+              importAsName: _import.at(-1),
+            }
+          : _import.at(0),
+      );
     });
   }
 
   return vueImports;
 }
+
+/**
+ *
+ * @param depsToImport { (string || {name: string; importAsName: string})[] }
+ * @return { Promise<{[key: string]: Object }> }
+ */
+const getImportsMap = async (depsToImport) => {
+  const vue = await import("vue");
+
+  return depsToImport.reduce((accum, dep) => {
+    const isImportAs = typeof dep === "object";
+
+    const vueImportName = isImportAs ? dep.name : dep;
+
+    const usedImportName = isImportAs ? dep.importAsName : dep;
+
+    if (vue[vueImportName])
+      accum = { ...accum, [usedImportName]: vue[vueImportName] };
+    return accum;
+  }, {});
+};
 
 /**
  *
@@ -166,47 +187,38 @@ function getVueImportedDependencies(code) {
  */
 const processTemplate = async (descriptor, id) => {
   if (descriptor.template) {
-
     // Compile template to render function
     const { code, errors } = compileTemplate({
       source: descriptor.template.content,
-      id
+      id,
     });
 
     if (errors.length) throw errors;
 
-    const depsToImport = getVueImportedDependencies(code);
+    const depsToImport = getVueDependenciesImports(code);
 
-    const vue = await import("vue");
+    const importedDependencies = await getImportsMap(depsToImport);
 
-    const importedDependencies = depsToImport.reduce((accum, dep) => {
+    let parsedTemplateContent = removeVueImports(code);
 
-      const isImportAs = typeof dep === "object";
+    parsedTemplateContent = parsedTemplateContent
+      .replaceAll("export", "")
+      .trim();
 
-      const vueImportName = isImportAs ? dep.name : dep;
+    const renderFn = new Function(
+      "deps",
+      `
 
-      const usedImportName = isImportAs ? dep.importAsName : dep;
-
-      if (vue[vueImportName]) accum = {...accum, [usedImportName]: vue[vueImportName]}
-      return accum;
-    }, {})
-
-    let parsedTemplateContent = removeVueImports(code)
-
-    parsedTemplateContent = parsedTemplateContent.replaceAll("export", "").trim()
-
-    const renderFn = new Function('deps', `
-
-      const {${Object.keys(importedDependencies).join(',')}} = deps;
+      const {${Object.keys(importedDependencies).join(",")}} = deps;
 
        return ${parsedTemplateContent}
-    `)(importedDependencies)
+    `,
+    )(importedDependencies);
 
     return renderFn;
   }
   return null;
-}
-
+};
 
 /**
  *
@@ -216,46 +228,64 @@ const processTemplate = async (descriptor, id) => {
  */
 const processScript = async (descriptor, id) => {
   if (descriptor.script || descriptor.scriptSetup) {
+    const storeVariable = "ComponentScript";
 
-    const storeVariable = 'ComponentScript'
-
-    const {content} = compileScript(descriptor, {
+    let { content } = compileScript(descriptor, {
       id,
       inlineTemplate: true,
-      genDefaultAs: storeVariable
-    })
+      templateOptions: {
+        id,
+      },
+      genDefaultAs: storeVariable,
+      babelParserPlugins: ["typescript"],
+    });
 
-    const parsedScriptContent = removeVueImports(content);
+    if (isScriptLanguageTS(descriptor)) {
+      const { code } = await handleTypescriptTranspilation(content);
 
-    const depsToImport = getVueImportedDependencies(content);
+      content = code;
+    }
 
-    const vue = await import("vue");
+    const parsedScriptContent = removeVueImports(content).trim();
 
-    const importedDependencies = depsToImport.reduce((accum, dep) => {
+    const depsToImport = getVueDependenciesImports(content);
 
-      const isImportAs = typeof dep === "object";
+    const importedDependencies = await getImportsMap(depsToImport);
 
-      const vueImportName = isImportAs ? dep.name : dep;
+    const script = new Function(
+      "deps",
+      `
 
-      const usedImportName = isImportAs ? dep.importAsName : dep;
-
-      if (vue[vueImportName]) accum = {...accum, [usedImportName]: vue[vueImportName]}
-      return accum;
-    }, {})
-
-    const script = new Function('deps', `
-
-      const {${Object.keys(importedDependencies).join(',')}} = deps;
+      const {${Object.keys(importedDependencies).join(",")}} = deps;
 
       ${parsedScriptContent}
 
       return ${storeVariable}
-    `)(importedDependencies)
+    `,
+    )(importedDependencies);
 
     return script;
   }
-  return {}
-}
+  return {};
+};
+
+/**
+ *
+ * @param descriptor {import("@vue/compiler-sfc").SFCDescriptor}
+ * @return {boolean}
+ */
+const isScriptLanguageTS = (descriptor) => {
+  return (
+    descriptor.script?.attrs.lang === "ts" ||
+    descriptor.scriptSetup?.attrs.lang === "ts"
+  );
+};
+
+const handleTypescriptTranspilation = (sfcCompiledContent) => {
+  return transform(sfcCompiledContent, {
+    loader: "ts",
+  });
+};
 
 /**
  *
@@ -265,22 +295,20 @@ const processScript = async (descriptor, id) => {
  */
 const processStyles = (descriptor, id) => {
   if (descriptor.styles) {
-
     return descriptor.styles.reduce((css, styleBlock) => {
-
-      const {code, errors} = compileStyle({
+      const { code, errors } = compileStyle({
         id,
         source: styleBlock.content,
-        scoped: styleBlock.scoped
-      })
+        scoped: styleBlock.scoped,
+      });
 
       if (errors.length) throw errors;
 
-      return (css + '\n' + code).trim();
-    }, "")
+      return (css + "\n" + code).trim();
+    }, "");
   }
   return null;
-}
+};
 
 /**
  * @param document {Document}
@@ -289,53 +317,51 @@ const processStyles = (descriptor, id) => {
  */
 const loadComponentCSS = (document, component, styles) => {
   if (component) {
+    const cssBlob = new Blob([styles], { type: "text/css" });
 
-    const cssBlob = new Blob([styles], {type: "text/css"})
+    const url = URL.createObjectURL(cssBlob);
 
-    const url = URL.createObjectURL(cssBlob)
+    const link = document.createElement("link");
 
-    const link = document.createElement("link")
-
-    link.rel = "stylesheet"
-    link.type = "text/css"
+    link.rel = "stylesheet";
+    link.type = "text/css";
     link.href = url;
 
     link.onload = () => {
-      URL.revokeObjectURL(url)
-    }
+      URL.revokeObjectURL(url);
+    };
 
-    document.head.append(link, url)
+    document.head.append(link, url);
   }
-}
+};
 
 let appInstance = null;
-  async function compileAndRender(vueCode, mountPoint, componentName) {
-
-  if (appInstance) appInstance.unmount()
+async function compileAndRender(vueCode, mountPoint, componentName) {
+  if (appInstance) appInstance.unmount();
 
   const { descriptor } = parse(vueCode);
 
-   try {
-     const hash = 'hash' //Change
+  try {
+    const hash = useId();
 
-     const render = await processTemplate(descriptor, hash);
+    const render = await processTemplate(descriptor, hash);
 
-     let script = await processScript(descriptor, hash)
+    let script = await processScript(descriptor, hash);
 
-     const styles = processStyles(descriptor, hash);
+    const styles = processStyles(descriptor, hash);
 
-     script.__name = componentName;
-     script.render = render;
+    script.__name = componentName;
+    script.render = render;
 
-     appInstance = createApp(script);
+    appInstance = createApp(script);
 
-     const component = appInstance.mount(mountPoint);
+    const component = appInstance.mount(mountPoint);
 
-     if (component) loadComponentCSS(mountPoint.ownerDocument, component, styles)
-   }
-   catch(e) {
-     console.error("Compilation error")
-   }
+    if (component)
+      loadComponentCSS(mountPoint.ownerDocument, component, styles);
+  } catch (e) {
+    console.error("Compilation error");
+  }
 }
 
 const injectVueAnchor = () => {
@@ -350,14 +376,29 @@ const injectVueAnchor = () => {
   return anchor;
 };
 
-
 watch(code, (sfcComponentCode) => {
   compileAndRender(sfcComponentCode, getVueRoot());
-})
+});
+
+const initializeESBuild = async () => {
+  try {
+    await initialize({
+      wasmURL: "./node_modules/esbuild-wasm/esbuild.wasm",
+    });
+
+    console.log("ESBuild initialized successfully");
+  } catch (e) {
+    console.error("ESBuild failed to initialize", e);
+  }
+};
+
+onBeforeMount(async () => {
+  await initializeESBuild();
+});
 
 onMounted(() => {
   injectVueAnchor();
-  compileAndRender(code.value, getVueRoot())
+  compileAndRender(code.value, getVueRoot());
 });
 </script>
 
@@ -399,6 +440,6 @@ onMounted(() => {
 }
 
 iframe {
-width: 100%;
+  width: 100%;
 }
 </style>
