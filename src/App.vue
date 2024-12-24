@@ -383,7 +383,7 @@ watch(code, (sfcComponentCode) => {
 const initializeESBuild = async () => {
   try {
     await initialize({
-      wasmURL: '/wasm/esbuild.wasm'
+      wasmURL: 'esbuild.wasm'
     });
 
     console.log("ESBuild initialized successfully");
